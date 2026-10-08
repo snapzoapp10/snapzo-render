@@ -163,11 +163,18 @@ http
       const { sourceUrl, start = 30, end = 33 } = JSON.parse((await readBody(req)) || "{}");
       const dir = await mkdtemp(join(tmpdir(), "snapzo-test-"));
       const t = Date.now();
+      // Report what this machine has, so problems are visible without terminal access.
+      const diag = {};
+      try { diag.ytdlp = (await run(YTDLP, ["--version"], 15000, true)).trim(); } catch (e) { diag.ytdlp = `missing: ${e.message}`; }
+      try { diag.plugins = (await run(YTDLP, ["--list-plugins"], 15000, true)).trim() || "none"; } catch { diag.plugins = "unknown"; }
+      try { await access(COOKIES); diag.cookies = true; } catch { diag.cookies = false; }
+      try { const h = await fetch("http://127.0.0.1:4416/ping", { signal: AbortSignal.timeout(3000) }); diag.potServer = h.ok; } catch { diag.potServer = false; }
+      if (!sourceUrl) return json(res, 200, { diag });
       try {
         await download(sourceUrl, start, end, join(dir, "t.mp4"));
-        return json(res, 200, { ok: true, seconds: Math.round((Date.now() - t) / 1000) });
+        return json(res, 200, { ok: true, seconds: Math.round((Date.now() - t) / 1000), diag });
       } catch (e) {
-        return json(res, 200, { ok: false, error: String(e.message || e) });
+        return json(res, 200, { ok: false, error: String(e.message || e), diag });
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
