@@ -41,10 +41,25 @@ const STRATEGIES = [
   ["--extractor-args", "youtube:player_client=web_safari"],
 ];
 
+// Convert a JSON cookie export to Netscape format (browser extensions often give JSON).
+const toNetscape = (raw) => {
+  const t = raw.trim();
+  if (!t.startsWith("[") && !t.startsWith("{")) return raw;
+  const list = t.startsWith("{") ? JSON.parse(t).cookies || [] : JSON.parse(t);
+  const lines = ["# Netscape HTTP Cookie File"];
+  for (const c of list) {
+    const domain = c.domain || "";
+    lines.push([domain, domain.startsWith(".") ? "TRUE" : "FALSE", c.path || "/", c.secure ? "TRUE" : "FALSE", Math.floor(c.expirationDate || c.expires || 0), c.name || "", c.value || ""].join("\t"));
+  }
+  return lines.join("\n") + "\n";
+};
+
 const baseArgs = async () => {
   const a = ["--no-playlist", "--no-warnings", "--socket-timeout", "20", "--retries", "3", "--js-runtimes", "node"];
   try {
-    await access(COOKIES);
+    const raw = await readFile(COOKIES, "utf8");
+    const fixed = toNetscape(raw);
+    if (fixed !== raw) await writeFile(COOKIES, fixed);
     a.push("--cookies", COOKIES);
   } catch {}
   return a;
@@ -183,22 +198,7 @@ http
     // Save YouTube cookies sent from Snapzo, used for every download.
     // Accepts Netscape text or JSON (from browser extensions) and always stores Netscape.
     if (req.method === "POST" && url.pathname === "/cookies") {
-      const raw = await readBody(req);
-      let text = raw;
-      const t = raw.trim();
-      if (t.startsWith("[") || t.startsWith("{")) {
-        const list = t.startsWith("{") ? JSON.parse(t).cookies || [] : JSON.parse(t);
-        const lines = ["# Netscape HTTP Cookie File"];
-        for (const c of list) {
-          const domain = c.domain || "";
-          const includeSub = domain.startsWith(".") ? "TRUE" : "FALSE";
-          const secure = c.secure ? "TRUE" : "FALSE";
-          const exp = Math.floor(c.expirationDate || c.expires || 0);
-          lines.push([domain, includeSub, c.path || "/", secure, exp, c.name || "", c.value || ""].join("\t"));
-        }
-        text = lines.join("\n") + "\n";
-      }
-      await writeFile(COOKIES, text);
+      await writeFile(COOKIES, toNetscape(await readBody(req)));
       return json(res, 200, { ok: true });
     }
 
