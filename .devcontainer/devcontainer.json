@@ -1,0 +1,6 @@
+{
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:22",
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y ffmpeg python3 curl fonts-dejavu-core && sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && sudo chmod +x /usr/local/bin/yt-dlp",
+  "forwardPorts": [8787],
+  "portsAttributes": { "8787": { "label": "Render Server", "onAutoForward": "notify" } }
+}
