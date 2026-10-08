@@ -180,9 +180,25 @@ http
       }
     }
 
-    // Save YouTube cookies (Netscape format) sent from Snapzo, used for every download.
+    // Save YouTube cookies sent from Snapzo, used for every download.
+    // Accepts Netscape text or JSON (from browser extensions) and always stores Netscape.
     if (req.method === "POST" && url.pathname === "/cookies") {
-      await writeFile(COOKIES, await readBody(req));
+      const raw = await readBody(req);
+      let text = raw;
+      const t = raw.trim();
+      if (t.startsWith("[") || t.startsWith("{")) {
+        const list = t.startsWith("{") ? JSON.parse(t).cookies || [] : JSON.parse(t);
+        const lines = ["# Netscape HTTP Cookie File"];
+        for (const c of list) {
+          const domain = c.domain || "";
+          const includeSub = domain.startsWith(".") ? "TRUE" : "FALSE";
+          const secure = c.secure ? "TRUE" : "FALSE";
+          const exp = Math.floor(c.expirationDate || c.expires || 0);
+          lines.push([domain, includeSub, c.path || "/", secure, exp, c.name || "", c.value || ""].join("\t"));
+        }
+        text = lines.join("\n") + "\n";
+      }
+      await writeFile(COOKIES, text);
       return json(res, 200, { ok: true });
     }
 
