@@ -1,30 +1,82 @@
-// Snapzo render server — run on your own VPS (needs yt-dlp + ffmpeg; see Dockerfile).
-// Env: SECRET (same value as RENDER_SERVER_SECRET in the app), PORT (default 8787).
+// Snapzo render server — turns a YouTube link + start/end into a clean 9:16 MP4 and uploads it to Snapzo.
+// Start with: SECRET=<same as RENDER_SERVER_SECRET> bash start.sh   (start.sh installs everything)
+// Env: SECRET, PORT (default 8787), YTDLP (path to yt-dlp, default "yt-dlp").
 import http from "node:http";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 const SECRET = process.env.SECRET;
 const PORT = Number(process.env.PORT || 8787);
+const YTDLP = process.env.YTDLP || "yt-dlp";
+const COOKIES = join(homedir(), ".snapzo-cookies.txt");
 if (!SECRET) throw new Error("SECRET env var is required");
 
 // Hard limits so one stalled download can never freeze the whole machine.
-const DOWNLOAD_MS = 420000; // 7 min for grabbing the section from YouTube
-const RENDER_MS = 300000; // 5 min for cropping + captioning
+const DOWNLOAD_MS = 420000;
+const RENDER_MS = 300000;
 
-const run = (cmd, args, timeoutMs) =>
+const run = (cmd, args, timeoutMs, keepOut = false) =>
   new Promise((res, rej) => {
-    const p = spawn(cmd, args, { stdio: ["ignore", "ignore", "pipe"], timeout: timeoutMs });
+    const p = spawn(cmd, args, { stdio: ["ignore", keepOut ? "pipe" : "ignore", "pipe"], timeout: timeoutMs });
     let err = "";
-    p.stderr.on("data", (d) => (err = (err + d).slice(-2000)));
+    let out = "";
+    p.stdout?.on("data", (d) => (out = (out + d).slice(-4000)));
+    p.stderr.on("data", (d) => (err = (err + d).slice(-4000)));
+    p.on("error", (e) => rej(e));
     p.on("close", (c) => {
-      if (c === 0) return res();
-      const last = err.split("\n").filter(Boolean).pop();
-      rej(new Error(c === null ? `${cmd} timed out after ${Math.round(timeoutMs / 1000)}s` : `${cmd} failed: ${last ?? c}`));
+      if (c === 0) return res(out);
+      const last = err.split("\n").filter((l) => /error/i.test(l)).pop() ?? err.split("\n").filter(Boolean).pop();
+      rej(new Error(c === null ? `${cmd} timed out after ${Math.round(timeoutMs / 1000)}s` : `${last ?? c}`));
     });
   });
+
+// Different ways of asking YouTube for the file. A PO-token helper (bgutil, started by start.sh)
+// plus Node as JS runtime makes YouTube treat the machine like a normal browser.
+const STRATEGIES = [
+  [],
+  ["--extractor-args", "youtube:player_client=mweb"],
+  ["--extractor-args", "youtube:player_client=tv"],
+  ["--extractor-args", "youtube:player_client=web_safari"],
+];
+
+const baseArgs = async () => {
+  const a = ["--no-playlist", "--no-warnings", "--socket-timeout", "20", "--retries", "3", "--js-runtimes", "node"];
+  try {
+    await access(COOKIES);
+    a.push("--cookies", COOKIES);
+  } catch {}
+  return a;
+};
+
+async function download(url, start, end, src) {
+  const errors = [];
+  for (const extra of STRATEGIES) {
+    try {
+      await rm(src, { force: true });
+      await run(
+        YTDLP,
+        [
+          ...(await baseArgs()),
+          ...extra,
+          "-f", "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/bv*[height<=1080]+ba/b",
+          "--download-sections", `*${start}-${end}`,
+          "--force-keyframes-at-cuts",
+          "--merge-output-format", "mp4",
+          "-o", src,
+          url,
+        ],
+        DOWNLOAD_MS,
+      );
+      return;
+    } catch (e) {
+      errors.push(String(e.message || e));
+      console.log("download attempt failed:", extra.join(" ") || "default", "-", e.message);
+    }
+  }
+  throw new Error(`YouTube download failed: ${errors.pop()}`);
+}
 
 const esc = (t) => t.replace(/\\/g, "\\\\").replace(/'/g, "\u2019").replace(/:/g, "\\:").replace(/%/g, "\\%");
 
@@ -35,21 +87,7 @@ async function render(job) {
     const out = join(dir, "out.mp4");
     const start = Math.max(0, Number(job.start));
     const end = Math.max(start + 1, Number(job.end));
-    await run(
-      "yt-dlp",
-      [
-        "--no-playlist",
-        "--socket-timeout", "20",
-        "--retries", "3",
-        "-f", "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
-        "--download-sections", `*${start}-${end}`,
-        "--force-keyframes-at-cuts",
-        "--merge-output-format", "mp4",
-        "-o", src,
-        job.sourceUrl,
-      ],
-      DOWNLOAD_MS,
-    );
+    await download(job.sourceUrl, start, end, src);
     const [W, H] = job.vertical ? [1080, 1920] : [1920, 1080];
     let vf = `scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H}`;
     if (job.caption) {
@@ -64,7 +102,9 @@ async function render(job) {
     const up = await fetch(job.uploadUrl, { method: "PUT", headers: { "Content-Type": "video/mp4" }, body: await readFile(out) });
     if (!up.ok) throw new Error(`Upload failed (${up.status})`);
     await callback(job, { ok: true });
+    console.log("done", job.clipId);
   } catch (e) {
+    console.log("failed", job.clipId, e.message);
     await callback(job, { ok: false, error: String(e.message || e).slice(0, 480) });
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -96,32 +136,65 @@ const next = async () => {
   }
 };
 
+const authed = (req) => req.headers.authorization === `Bearer ${SECRET}`;
+const json = (res, code, obj) => res.writeHead(code, { "Content-Type": "application/json" }).end(JSON.stringify(obj));
+const readBody = (req) =>
+  new Promise((r) => {
+    let b = "";
+    req.on("data", (d) => (b += d));
+    req.on("end", () => r(b));
+  });
+
 http
-  .createServer((req, res) => {
-    if (req.method === "GET" && req.url === "/health") return res.end("ok");
-    if (req.method === "GET" && req.url === "/jobs") {
-      return res.writeHead(200, { "Content-Type": "application/json" }).end(
-        JSON.stringify({
-          busy,
-          queued: queue.length,
-          making: current ? { clipId: current.clipId, seconds: Math.round((Date.now() - current.startedAt) / 1000) } : null,
-        }),
-      );
+  .createServer(async (req, res) => {
+    const url = new URL(req.url, "http://x");
+    if (req.method === "GET" && url.pathname === "/health") return res.end("ok");
+    if (req.method === "GET" && url.pathname === "/jobs") {
+      return json(res, 200, {
+        busy,
+        queued: queue.length,
+        making: current ? { clipId: current.clipId, seconds: Math.round((Date.now() - current.startedAt) / 1000) } : null,
+      });
     }
-    if (req.method !== "POST" || req.url !== "/render") return res.writeHead(404).end();
-    if (req.headers.authorization !== `Bearer ${SECRET}`) return res.writeHead(401).end();
-    let body = "";
-    req.on("data", (d) => (body += d));
-    req.on("end", () => {
+    if (!authed(req)) return res.writeHead(401).end();
+
+    // Quick check: can this machine fetch a short piece of a YouTube video right now?
+    if (req.method === "POST" && url.pathname === "/selftest") {
+      const { sourceUrl, start = 30, end = 33 } = JSON.parse((await readBody(req)) || "{}");
+      const dir = await mkdtemp(join(tmpdir(), "snapzo-test-"));
+      const t = Date.now();
       try {
-        const job = JSON.parse(body);
-        if (!/^https:\/\/(www\.)?(youtube\.com|youtu\.be)\//.test(job.sourceUrl)) throw new Error("Only YouTube links");
-        queue.push(job);
-        next();
-        res.writeHead(202, { "Content-Type": "application/json" }).end(JSON.stringify({ queued: queue.length }));
+        await download(sourceUrl, start, end, join(dir, "t.mp4"));
+        return json(res, 200, { ok: true, seconds: Math.round((Date.now() - t) / 1000) });
       } catch (e) {
-        res.writeHead(400).end(String(e.message));
+        return json(res, 200, { ok: false, error: String(e.message || e) });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
       }
-    });
+    }
+
+    // Save YouTube cookies (Netscape format) sent from Snapzo, used for every download.
+    if (req.method === "POST" && url.pathname === "/cookies") {
+      await writeFile(COOKIES, await readBody(req));
+      return json(res, 200, { ok: true });
+    }
+
+    // Pull the latest code from GitHub and restart (start.sh loop brings it back up).
+    if (req.method === "POST" && url.pathname === "/update") {
+      if (busy) return json(res, 409, { ok: false, error: "busy" });
+      json(res, 200, { ok: true });
+      return setTimeout(() => process.exit(0), 300);
+    }
+
+    if (req.method !== "POST" || url.pathname !== "/render") return res.writeHead(404).end();
+    try {
+      const job = JSON.parse(await readBody(req));
+      if (!/^https:\/\/(www\.|m\.)?(youtube\.com|youtu\.be)\//.test(job.sourceUrl)) throw new Error("Only YouTube links");
+      queue.push(job);
+      next();
+      json(res, 202, { queued: queue.length });
+    } catch (e) {
+      res.writeHead(400).end(String(e.message));
+    }
   })
   .listen(PORT, () => console.log(`Snapzo render server on :${PORT}`));
