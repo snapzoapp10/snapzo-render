@@ -18,13 +18,21 @@ pkill -f "node server.mjs" 2>/dev/null
 sleep 1
 
 echo "== Installing video tools (first time takes ~2 min)"
-if ! command -v ffmpeg >/dev/null; then
-  sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-dejavu-core python3-venv >/dev/null
+export DEBIAN_FRONTEND=noninteractive
+PYV="$(python3 -c 'import sys;print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+if ! command -v ffmpeg >/dev/null || ! python3 -c 'import ensurepip' 2>/dev/null; then
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq ffmpeg fonts-dejavu-core python3-venv "python${PYV}-venv" >/dev/null 2>&1 \
+    || sudo apt-get install -y -qq ffmpeg fonts-dejavu-core python3-venv >/dev/null
 fi
 if [ ! -x "$HOME/ytenv/bin/pip" ]; then
-  python3 -m venv "$HOME/ytenv" 2>/dev/null || { sudo apt-get install -y -qq python3-venv >/dev/null; python3 -m venv "$HOME/ytenv"; }
+  rm -rf "$HOME/ytenv"
+  python3 -m venv "$HOME/ytenv"
 fi
-"$HOME/ytenv/bin/pip" install -q -U "yt-dlp[default]" bgutil-ytdlp-pot-provider
+for i in 1 2 3 4 5; do
+  "$HOME/ytenv/bin/pip" install -q -U --timeout 60 --retries 10 "yt-dlp[default]" bgutil-ytdlp-pot-provider && break
+  echo "== network slow, retrying ($i)..."; sleep 5
+done
 
 POT_VER="$("$HOME/ytenv/bin/pip" show bgutil-ytdlp-pot-provider | awk '/^Version/{print $2}')"
 if [ ! -f "$HOME/bgutil/server/build/main.js" ] || [ "$(cat "$HOME/bgutil/.ver" 2>/dev/null)" != "$POT_VER" ]; then
