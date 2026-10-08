@@ -182,7 +182,14 @@ http
       const diag = {};
       try { diag.ytdlp = (await run(YTDLP, ["--version"], 15000, true)).trim(); } catch (e) { diag.ytdlp = `missing: ${e.message}`; }
       try { diag.potPlugin = (await run(join(dirname(YTDLP), "pip"), ["show", "bgutil-ytdlp-pot-provider"], 15000, true)).split("\n").find((l) => l.startsWith("Version")) || "not installed"; } catch { diag.potPlugin = "not installed"; }
-      try { await access(COOKIES); diag.cookies = true; } catch { diag.cookies = false; }
+      try {
+        const raw = await readFile(COOKIES, "utf8");
+        const names = raw.split("\n").filter((l) => l && !l.startsWith("#")).map((l) => l.split("\t")[5]).filter(Boolean);
+        diag.cookies = true;
+        diag.cookieCount = names.length;
+        diag.hasAuthCookie = names.includes("__Secure-3PSID") || names.includes("SID");
+        diag.cookieNames = names.slice(0, 40);
+      } catch { diag.cookies = false; }
       try { const h = await fetch("http://127.0.0.1:4416/ping", { signal: AbortSignal.timeout(3000) }); diag.potServer = h.ok; } catch { diag.potServer = false; }
       if (!sourceUrl) return json(res, 200, { diag });
       try {
