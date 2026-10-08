@@ -5,7 +5,7 @@ import http from "node:http";
 import { spawn } from "node:child_process";
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const SECRET = process.env.SECRET;
 const PORT = Number(process.env.PORT || 8787);
@@ -166,7 +166,7 @@ http
       // Report what this machine has, so problems are visible without terminal access.
       const diag = {};
       try { diag.ytdlp = (await run(YTDLP, ["--version"], 15000, true)).trim(); } catch (e) { diag.ytdlp = `missing: ${e.message}`; }
-      try { diag.plugins = (await run(YTDLP, ["--list-plugins"], 15000, true)).trim() || "none"; } catch { diag.plugins = "unknown"; }
+      try { diag.potPlugin = (await run(join(dirname(YTDLP), "pip"), ["show", "bgutil-ytdlp-pot-provider"], 15000, true)).split("\n").find((l) => l.startsWith("Version")) || "not installed"; } catch { diag.potPlugin = "not installed"; }
       try { await access(COOKIES); diag.cookies = true; } catch { diag.cookies = false; }
       try { const h = await fetch("http://127.0.0.1:4416/ping", { signal: AbortSignal.timeout(3000) }); diag.potServer = h.ok; } catch { diag.potServer = false; }
       if (!sourceUrl) return json(res, 200, { diag });
